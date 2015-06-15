@@ -1,11 +1,11 @@
 {
-  "name": "chrome-fs",
+  "name": "chrome-sync-fs",
   "version": "1.2.3",
-  "description": "Use the Node `fs` API in Chrome Apps",
+  "description": "Use the Node `fs` API in Chrome Apps with syncFileSystem support",
   "main": "main.js",
   "browser": "chrome.js",
   "scripts": {
-    "test": "standard && browserify test/chrome-app/index.js -o test/chrome-app/bundle.js && node test/runner.js"
+    "test": "webpack test/chrome-app/index.js -o test/chrome-app/bundle.js && node test/runner.js"
   },
   "repository": {
     "type": "git",
@@ -21,6 +21,8 @@
   },
   "homepage": "https://github.com/No9/chrome-fs",
   "devDependencies": {
+    "node-libs-browser": "^0.5.2",
+    "webpack": "^1.9.11"
   },
   "dependencies": {
     "util": "^0.10.3"

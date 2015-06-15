@@ -1,282 +1,329 @@
-var util = require('util')
-var Buffer = require('buffer').Buffer
-var Stream = require('stream').Stream
-var constants = require('constants')
+'use strict';
 
-var Readable = Stream.Readable
-var Writable = Stream.Writable
+var util = require('util');
+var Buffer = require('buffer').Buffer;
+var Stream = require('stream').Stream;
+var constants = require('constants');
 
-var FILESYSTEM_DEFAULT_SIZE = 250 * 1024 * 1024	// 250MB
-var DEBUG = true
-var kMinPoolSpace = 128
-var pool
+var Readable = Stream.Readable;
+var Writable = Stream.Writable;
 
-var O_APPEND = constants.O_APPEND || 0
-var O_CREAT = constants.O_CREAT || 0
-var O_EXCL = constants.O_EXCL || 0
-var O_RDONLY = constants.O_RDONLY || 0
-var O_RDWR = constants.O_RDWR || 0
-var O_SYNC = constants.O_SYNC || 0
-var O_TRUNC = constants.O_TRUNC || 0
-var O_WRONLY = constants.O_WRONLY || 0
+var FILESYSTEM_DEFAULT_SIZE = 250 * 1024 * 1024;// 250MB
+var DEBUG = true;
+var kMinPoolSpace = 128;
+var pool;
 
-window.requestFileSystem = window.requestFileSystem || window.webkitRequestFileSystem
+var O_APPEND = constants.O_APPEND || 0;
+var O_CREAT = constants.O_CREAT || 0;
+var O_EXCL = constants.O_EXCL || 0;
+var O_RDONLY = constants.O_RDONLY || 0;
+var O_RDWR = constants.O_RDWR || 0;
+var O_SYNC = constants.O_SYNC || 0;
+var O_TRUNC = constants.O_TRUNC || 0;
+var O_WRONLY = constants.O_WRONLY || 0;
 
-function allocNewPool (poolSize) {
-  pool = new Buffer(poolSize)
-  pool.used = 0
+function requestFileSystem(callback, errorCallback){
+  chrome.syncFileSystem.requestFileSystem(function(filesystem){
+    var err = chrome.runtime.lastError;
+    if(err){
+      if(errorCallback){
+        errorCallback(err);
+      }
+      return;
+    }
+    callback(filesystem);
+  });
 }
 
-function nullCheck (path, callback) {
+function flagToString (flag) {
+  // Only mess with strings
+  if (util.isString(flag)) {
+    return flag;
+  }
+
+  switch (flag) {
+    case O_RDONLY : return 'r';
+    case O_RDONLY | O_SYNC : return 'sr';
+    case O_RDWR : return 'r+';
+    case O_RDWR | O_SYNC : return 'sr+';
+
+    case O_TRUNC | O_CREAT | O_WRONLY : return 'w';
+    case O_TRUNC | O_CREAT | O_WRONLY | O_EXCL : return 'xw';
+
+    case O_TRUNC | O_CREAT | O_RDWR : return 'w+';
+    case O_TRUNC | O_CREAT | O_RDWR | O_EXCL : return 'xw+';
+
+    case O_APPEND | O_CREAT | O_WRONLY : return 'a';
+    case O_APPEND | O_CREAT | O_WRONLY | O_EXCL : return 'xa';
+
+    case O_APPEND | O_CREAT | O_RDWR : return 'a+';
+    case O_APPEND | O_CREAT | O_RDWR | O_EXCL : return 'xa+';
+  }
+
+  throw new Error('Unknown file open flag: ' + flag);
+}
+
+function allocNewPool(poolSize) {
+  pool = new Buffer(poolSize);
+  pool.used = 0;
+}
+
+function nullCheck(path, callback) {
   if (('' + path).indexOf('\u0000') !== -1) {
-    var er = new Error('Path must be a string without null bytes.')
+    var er = new Error('Path must be a string without null bytes.');
     if (!callback) {
-      throw er
+      throw er;
     }
     process.nextTick(function () {
-      callback(er)
-    })
-    return false
+      callback(er);
+    });
+    return false;
   }
-  return true
-}
-
-function maybeCallback (cb) {
-  return util.isFunction(cb) ? cb : rethrow()
-}
-
-function makeCallback (cb) {
-  if (util.isNullOrUndefined(cb)) {
-    return rethrow()
-  }
-
-  if (!util.isFunction(cb)) {
-    throw new TypeError('callback must be a function')
-  }
-
-  return function () {
-    return cb.apply(null, arguments)
-  }
+  return true;
 }
 
 function rethrow () {
   // Only enable in debug mode. A backtrace uses ~1000 bytes of heap space and
   // is fairly slow to generate.
   if (DEBUG) { // eslint-disable-line
-    var backtrace = new Error()
-    return function (err) {
+    var backtrace = new Error();
+    return function(err) {
       if (err) {
         backtrace.stack = err.name + ': ' + err.message +
-                          backtrace.stack.substr(backtrace.name.length)
-        err = backtrace
-        throw err
+                          backtrace.stack.substr(backtrace.name.length);
+        err = backtrace;
+        throw err;
       }
-    }
+    };
   }
+}
+
+function maybeCallback (cb) {
+  return util.isFunction(cb) ? cb : rethrow();
+}
+
+function makeCallback (cb) {
+  if (util.isNullOrUndefined(cb)) {
+    return rethrow();
+  }
+
+  if (!util.isFunction(cb)) {
+    throw new TypeError('callback must be a function');
+  }
+
+  return function () {
+    return cb.apply(null, arguments);
+  };
 }
 
 function resolve (path) {
   if (typeof path !== 'string') {
-    throw Error('Cannot resolve: Paths must be strings')
+    throw Error('Cannot resolve: Paths must be strings');
   }
-  var retString = path
+  var retString = path;
   if (retString[0] === '/') {
-    retString = retString.slice(1)
+    retString = retString.slice(1);
   }
   if (retString[retString.length - 1] === '/') {
-    retString = retString.slice(0, retString.length - 1)
+    retString = retString.slice(0, retString.length - 1);
   }
-  return retString
+  return retString;
 }
 
 function assertEncoding (encoding) {
   if (encoding && !Buffer.isEncoding(encoding)) {
-    throw new Error('Unknown encoding: ' + encoding)
+    throw new Error('Unknown encoding: ' + encoding);
   }
 }
 
 function modeNum (m, def) {
   if (util.isNumber(m)) {
-    return m
+    return m;
   }
   if (util.isString(m)) {
-    return parseInt(m, 8)
+    return parseInt(m, 8);
   }
   if (def) {
-    return modeNum(def)
+    return modeNum(def);
   }
-  return undefined
+  return undefined;
 }
 
 exports.chown = function (path, uid, gid, callback) {
-  resolve(path)
-  callback = makeCallback(callback)
-  if (!nullCheck(path, callback)) return
+  resolve(path);
+  callback = makeCallback(callback);
+  if (!nullCheck(path, callback)) {
+    return;
+  }
 
   this.exists(path, function (exists) {
-    if (exists) {
-      callback()
+    if(exists){
+      callback();
     } else {
-      callback('File does not exist')
+      callback('File does not exist');
     }
-  })
-}
+  });
+};
 
 exports.fchown = function (fd, uid, gid, callback) {
-  this.chown(fd.filePath, uid, gid, callback)
-}
+  this.chown(fd.filePath, uid, gid, callback);
+};
 
 exports.chmod = function (path, mode, callback) {
-  resolve(path)
-  callback = makeCallback(callback)
-  if (!nullCheck(path, callback)) return
+  resolve(path);
+  callback = makeCallback(callback);
+  if (!nullCheck(path, callback)) {
+    return;
+  }
 
   this.exists(path, function (exists) {
     if (exists) {
-      callback()
+      callback();
     } else {
-      callback('File does not exist')
+      callback('File does not exist');
     }
-  })
-}
+  });
+};
 
 exports.fchmod = function (fd, mode, callback) {
-  this.chmod(fd.filePath, mode, callback)
-}
+  this.chmod(fd.filePath, mode, callback);
+};
 
 exports.exists = function (path, callback) {
-  resolve(path)
-  window.requestFileSystem(window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
-      function (cfs) {
+  resolve(path);
+  requestFileSystem(function (cfs) {
         cfs.root.getFile(path, {},
-              function (fileEntry) {
-                callback(true)
+              function () {
+                callback(true);
               }, function () {
-                callback(false)
-              })
-      }, function () { callback(false) })
-}
+                callback(false);
+              });
+      }, function () {
+        callback(false);
+      });
+};
 
 exports.mkdir = function (path, mode, callback) {
-  resolve(path)
-  if (util.isFunction(mode)) callback = mode
-  callback = makeCallback(callback)
-  if (!nullCheck(path, callback)) return
+  resolve(path);
+  if (util.isFunction(mode)) {
+    callback = mode;
+  }
+  callback = makeCallback(callback);
+  if (!nullCheck(path, callback)) {
+    return;
+  }
 
-  window.requestFileSystem(window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
-      function (cfs) {
+  requestFileSystem(function (cfs) {
         cfs.root.getDirectory(path, {create: true},
-              function (dirEntry) {
-                callback()
-              }, callback)
-      }, callback)
-}
+              function () {
+                callback();
+              }, callback);
+      }, callback);
+};
 
 exports.rmdir = function (path, callback) {
-  resolve(path)
-  callback = maybeCallback(callback)
-  if (!nullCheck(path, callback)) return
+  resolve(path);
+  callback = maybeCallback(callback);
+  if (!nullCheck(path, callback)){
+    return;
+  }
 
-  window.requestFileSystem(window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
-      function (cfs) {
+  requestFileSystem(function (cfs) {
         cfs.root.getDirectory(path, {},
               function (dirEntry) {
                 dirEntry.remove(function () {
-                  callback()
-                }, callback)
-              }, callback)
-      }, callback)
-}
+                  callback();
+                }, callback);
+              }, callback);
+      }, callback);
+};
 
 exports.readdir = function (path, callback) {
-  resolve(path)
-  window.requestFileSystem(window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
-      function (cfs) {
+  resolve(path);
+  requestFileSystem(function (cfs) {
         cfs.root.getDirectory(path, {}, function (dirEntry) {
-          var dirReader = dirEntry.createReader()
+          var dirReader = dirEntry.createReader();
           dirReader.readEntries(function (entries) {
-            var fullPathList = []
+            var fullPathList = [];
             for (var i = 0; i < entries.length; i++) {
-              fullPathList.push(entries[i].name)
+              fullPathList.push(entries[i].name);
             }
-            callback(null, fullPathList)
-          }, callback)
-        }, callback)
-      }, callback)
-}
+            callback(null, fullPathList);
+          }, callback);
+        }, callback);
+      }, callback);
+};
 
 exports.rename = function (oldPath, newPath, callback) {
-  callback = makeCallback(callback)
+  callback = makeCallback(callback);
 
   if (!nullCheck(oldPath, callback)) {
-    return
+    return;
   }
 
   if (!nullCheck(newPath, callback)) {
-    return
+    return;
   }
-  oldPath = resolve(oldPath)
-  newPath = resolve(newPath)
-  var tmpPath = newPath.split('/')
-  var newFileName = tmpPath.pop()
-  var toDirectory = tmpPath.join('/')
+  oldPath = resolve(oldPath);
+  newPath = resolve(newPath);
+  var tmpPath = newPath.split('/');
+  var newFileName = tmpPath.pop();
+  var toDirectory = tmpPath.join('/');
   if (toDirectory === '') {
-    toDirectory = '/'
+    toDirectory = '/';
   }
 
-  window.requestFileSystem(
-      window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
-      function (cfs) {
+  requestFileSystem(function (cfs) {
         cfs.root.getFile(oldPath, {},
               function (fileEntry) {
-                fileEntry.onerror = callback
+                fileEntry.onerror = callback;
                 cfs.root.getDirectory(toDirectory, {}, function (dirEntry) {
-                  fileEntry.moveTo(dirEntry, newFileName)
-                  callback()
-                }, callback)
-                fileEntry.moveTo(toDirectory, newFileName, callback)
-              }, callback)
-      }, callback)
-}
+                  fileEntry.moveTo(dirEntry, newFileName);
+                  callback();
+                }, callback);
+                fileEntry.moveTo(toDirectory, newFileName, callback);
+              }, callback);
+      }, callback);
+};
 
 exports.ftruncate = function (fd, len, callback) {
-  if (util.isFunction(len)) {
-    callback = len
-    len = 0
-  } else if (util.isUndefined(len)) {
-    len = 0
+  if(util.isFunction(len)){
+    callback = len;
+    len = 0;
+  } else if(util.isUndefined(len)){
+    len = 0;
   }
-  var cb = makeCallback(callback)
-  fd.onerror = cb
-  fd.onwriteend = cb
-  fd.truncate(len)
-}
+  var cb = makeCallback(callback);
+  fd.onerror = cb;
+  fd.onwriteend = cb;
+  fd.truncate(len);
+};
 
 exports.truncate = function (path, len, callback) {
   if (util.isNumber(path)) {
-    return this.ftruncate(path, len, callback)
+    return this.ftruncate(path, len, callback);
   }
   if (util.isFunction(len)) {
-    callback = len
-    len = 0
+    callback = len;
+    len = 0;
   } else if (util.isUndefined(len)) {
-    len = 0
+    len = 0;
   }
 
-  callback = maybeCallback(callback)
+  callback = maybeCallback(callback);
   this.open(path, 'r+', function (er, fd) {
-    if (er) return callback(er)
-    fd.onwriteend = callback
-    fd.truncate(len)
-  })
-}
+    if(er){
+      return callback(er);
+    }
+    fd.onwriteend = callback;
+    fd.truncate(len);
+  });
+};
 
 exports.stat = function (path, callback) {
-  path = resolve(path)
-  window.requestFileSystem(
-        window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
-        function (cfs) {
-          var opts = {}
+  path = resolve(path);
+  requestFileSystem(function (cfs) {
+          var opts = {};
           cfs.root.getFile(path, opts, function (fileEntry) {
             fileEntry.file(function (file) {
               var statval = { dev: 0,
@@ -289,19 +336,19 @@ exports.stat = function (path, callback) {
                               size: file.size,
                               atime: null,
                               mtime: file.lastModifiedDate,
-                              ctime: null }
-              statval.isDirectory = function () { return false }
-              statval.isFile = function () { return true }
-              statval.isSocket = function () { return false }
-              statval.isBlockDevice = function () { return false }
-              statval.isCharacterDevice = function () { return false }
-              statval.isFIFO = function () { return false }
-              statval.isSymbolicLink = function () { return false }
-              callback(null, statval)
-            })
+                              ctime: null };
+              statval.isDirectory = function () { return false; };
+              statval.isFile = function () { return true; };
+              statval.isSocket = function () { return false; };
+              statval.isBlockDevice = function () { return false; };
+              statval.isCharacterDevice = function () { return false; };
+              statval.isFIFO = function () { return false; };
+              statval.isSymbolicLink = function () { return false; };
+              callback(null, statval);
+            });
           }, function (err) {
             if (err.name === 'TypeMismatchError') {
-              cfs.root.getDirectory(path, opts, function (dirEntry) {
+              cfs.root.getDirectory(path, opts, function () {
                var statval = { dev: 0,
                                 mode: 33206,
                                 nlink: 0,
@@ -314,55 +361,56 @@ exports.stat = function (path, callback) {
                                 mtime: new Date(0),
                                 ctime: null,
                                 blksize: -1,
-                                blocks: -1 }
-               statval.isDirectory = function () { return true }
-               statval.isFile = function () { return false }
-               statval.isSocket = function () { return false }
-               statval.isBlockDevice = function () { return false }
-               statval.isCharacterDevice = function () { return false }
-               statval.isFIFO = function () { return false }
-               statval.isSymbolicLink = function () { return false }
-               callback(null, statval)
-             })
+                                blocks: -1 };
+               statval.isDirectory = function () { return true; };
+               statval.isFile = function () { return false; };
+               statval.isSocket = function () { return false; };
+               statval.isBlockDevice = function () { return false; };
+               statval.isCharacterDevice = function () { return false; };
+               statval.isFIFO = function () { return false; };
+               statval.isSymbolicLink = function () { return false; };
+               callback(null, statval);
+             });
             } else {
-              callback(err)
+              callback(err);
             }
-          })
-        }, callback)
-}
+          });
+        }, callback);
+};
 
 exports.fstat = function (fd, callback) {
-  this.stat(fd.filePath, callback)
-}
+  this.stat(fd.filePath, callback);
+};
 
 exports.writeFile = function (path, data, options, cb) {
-  var callback = maybeCallback(arguments[arguments.length - 1])
+  var callback = maybeCallback(arguments[arguments.length - 1]);
 
   if (util.isFunction(options) || !options) {
-    options = { encoding: 'utf8', mode: 438, flag: 'w' }  /*=0666*/
+    options = { encoding: 'utf8', mode: 438, flag: 'w' };  /*=0666*/
   } else if (util.isString(options)) {
-    options = { encoding: options, mode: 438, flag: 'w' }
+    options = { encoding: options, mode: 438, flag: 'w' };
   } else if (!util.isObject(options)) {
-    throw new TypeError('Bad arguments')
+    throw new TypeError('Bad arguments');
   }
 
-  assertEncoding(options.encoding)
-  callback()
-}
+  assertEncoding(options.encoding);
+  callback();
+};
 
 exports.open = function (path, flags, mode, callback) {
-  path = resolve(path)
-  flags = flagToString(flags)
-  callback = makeCallback(arguments[arguments.length - 1])
-  mode = modeNum(mode, 438 /*=0666*/)
+  path = resolve(path);
+  flags = flagToString(flags);
+  callback = makeCallback(arguments[arguments.length - 1]);
+  mode = modeNum(mode, 438 /*=0666*/);
 
-  if (!nullCheck(path, callback)) return
-  window.requestFileSystem(
-        window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
+  if (!nullCheck(path, callback)) {
+    return;
+  }
+  requestFileSystem(
         function (cfs) {
-          var opts = {}
+          var opts = {};
           if (flags.indexOf('w') > -1) {
-            opts = {create: true}
+            opts = {create: true};
           }
           cfs.root.getFile(
                 path,
@@ -372,208 +420,207 @@ exports.open = function (path, flags, mode, callback) {
                   // otherwise we get the file because 'standards'
                   if (flags.indexOf('w') > -1) {
                     fileEntry.createWriter(function (fileWriter) {
-                      fileWriter.fullPath = fileEntry.fullPath
-                      callback(null, fileWriter)
-                    }, callback)
+                      fileWriter.fullPath = fileEntry.fullPath;
+                      callback(null, fileWriter);
+                    }, callback);
                   } else {
                     fileEntry.file(function (file) {
-                      callback(null, file)
+                      callback(null, file);
                     })
                   }
                 }, function (err) {
                   // Work around for directory file descriptor
                   if (err.name === 'TypeMismatchError') {
-                    var dird = {}
-                    dird.filePath = path
-                    callback(null, dird)
+                    var dird = {};
+                    dird.filePath = path;
+                    callback(null, dird);
                   } else {
-                    callback(err)
+                    callback(err);
                   }
-                })
-        }, callback)
-}
+                });
+        }, callback);
+};
 
 exports.read = function (fd, buffer, offset, length, position, callback) {
   if (!util.isBuffer(buffer)) {
     // fs.read(fd, expected.length, 0, 'utf-8', function (err, str, bytesRead)
     // legacy string interface (fd, length, position, encoding, callback)
-    var cb = arguments[4]
-    var encoding = arguments[3]
+    var cb = arguments[4];
+    var encoding = arguments[3];
 
-    assertEncoding(encoding)
+    assertEncoding(encoding);
 
-    position = arguments[2]
-    length = arguments[1]
-    buffer = new Buffer(length)
-    offset = 0
+    position = arguments[2];
+    length = arguments[1];
+    buffer = new Buffer(length);
+    offset = 0;
 
-    callback = function (err, bytesRead, data) {
-      if (!cb) return
-      var str = ''
-      if (fd.type === 'text/plain') {
-        str = data
-      } else {
-        str = (bytesRead > 0) ? buffer.toString(encoding, 0, bytesRead) : '' // eslint-disable-line
+    callback = function (err, bytesRead, dat) {
+      if(!cb){
+        return;
       }
-      (cb)(err, str, bytesRead)
-    }
+      var str = '';
+      if (fd.type === 'text/plain') {
+        str = dat;
+      } else {
+        str = (bytesRead > 0) ? buffer.toString(encoding, 0, bytesRead) : ''; // eslint-disable-line
+      }
+      (cb)(err, str, bytesRead);
+    };
   }
-  fd.onerror = callback
-  var data = fd.slice(offset, length)
-  var fileReader = new FileReader() // eslint-disable-line
+  fd.onerror = callback;
+  var data = fd.slice(offset, length);
+  var fileReader = new FileReader();
   fileReader.onload = function (evt) {
-    var result
+    var result;
     if (util.isBuffer(buffer) && typeof this.result === 'string') {
-      result = new Buffer(this.result)
+      result = new Buffer(this.result);
     } else {
-      result = this.result
+      result = this.result;
     }
-    callback(null, result.length, result)
-  }
+    callback(null, result.length, result);
+  };
   fileReader.onerror = function (evt) {
-    callback(evt, null)
-  }
+    callback(evt, null);
+  };
   // no-op the onprogressevent
-  fileReader.onprogress = function () {}
+  fileReader.onprogress = function () {};
 
   if (fd.type === 'text/plain') {
-    fileReader.readAsText(data)
+    fileReader.readAsText(data);
   } else if (fd.type === 'application/octet-binary') {
-    fileReader.readAsArrayBuffer(data)
+    fileReader.readAsArrayBuffer(data);
   }
-}
+};
 
 exports.readFile = function (path, options, cb) {
-  var callback = maybeCallback(arguments[arguments.length - 1])
+  var callback = maybeCallback(arguments[arguments.length - 1]);
 
   if (util.isFunction(options) || !options) {
-    options = { encoding: null, flag: 'r' }
+    options = { encoding: null, flag: 'r' };
   } else if (util.isString(options)) {
-    options = { encoding: options, flag: 'r' }
+    options = { encoding: options, flag: 'r' };
   } else if (!util.isObject(options)) {
-    throw new TypeError('Bad arguments')
+    throw new TypeError('Bad arguments');
   }
 
-  var encoding = options.encoding
-  assertEncoding(encoding)
-  window.requestFileSystem(
-      window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
+  var encoding = options.encoding;
+  assertEncoding(encoding);
+  requestFileSystem(
       function (cfs) {
-        var opts = {}
+        var opts = {};
         cfs.root.getFile(
               path,
               opts,
               function (fileEntry) {
                 fileEntry.file(function (file) {
-                  fileEntry.onerror = callback
-                  var fileReader = new FileReader() // eslint-disable-line
+                  fileEntry.onerror = callback;
+                  var fileReader = new FileReader(); // eslint-disable-line
                   fileReader.onload = function (evt) {
-                    window.setTimeout(callback, 0, null, this.result)
+                    window.setTimeout(callback, 0, null, this.result);
                   }
                   fileReader.onerror = function (evt) {
-                    callback(evt, null)
+                    callback(evt, null);
                   }
 
                   if (file.type === 'text/plain') {
-                    fileReader.readAsText(file)
+                    fileReader.readAsText(file);
                   } else if (file.type === 'application/octet-binary') {
-                    fileReader.readAsArrayBuffer(file)
+                    fileReader.readAsArrayBuffer(file);
                   }
-                })
-              }, callback)
-      }, callback)
-}
+                });
+              }, callback);
+      }, callback);
+};
 
 exports.write = function (fd, buffer, offset, length, position, callback) {
   if (util.isBuffer(buffer)) {
     if (util.isFunction(position)) {
-      callback = position
-      position = null
+      callback = position;
+      position = null;
     }
-    callback = maybeCallback(callback)
-    fd.onerror = callback
-    var tmpbuf = buffer.slice(offset, length)
-    var bufblob = new Blob([tmpbuf], {type: 'application/octet-binary'}) // eslint-disable-line
+    callback = maybeCallback(callback);
+    fd.onerror = callback;
+    var tmpbuf = buffer.slice(offset, length);
+    var bufblob = new Blob([tmpbuf], {type: 'application/octet-binary'}); // eslint-disable-line
     if (fd.readyState > 0) {
       fd.onwriteend = function () {
-        fd.write(blob)
-        callback(null, buf.length)
+        fd.write(blob);
+        callback(null, buf.length);
       }
     } else {
-      fd.write(bufblob)
-      callback(null, tmpbuf.length)
+      fd.write(bufblob);
+      callback(null, tmpbuf.length);
     }
   } else {
     if (util.isString(buffer)) {
-      buffer += ''
+      buffer += '';
     }
     if (!util.isFunction(position)) {
       if (util.isFunction(offset)) {
-        position = offset
-        offset = null
+        position = offset;
+        offset = null;
       } else {
-        position = length
+        position = length;
       }
-      length = 'utf8'
+      length = 'utf8';
     }
-    callback = maybeCallback(position)
-    fd.onerror = callback
+    callback = maybeCallback(position);
+    fd.onerror = callback;
     var blob = new Blob([buffer], {type: 'text/plain'}) // eslint-disable-line
 
-    var buf = new Buffer(buffer)
+    var buf = new Buffer(buffer);
 
     if (fd.readyState > 0) {
       fd.onwriteend = function () {
         if (position !== null) {
-          fd.seek(position)
+          fd.seek(position);
         }
-        fd.write(blob)
-        callback(null, buf.length)
+        fd.write(blob);
+        callback(null, buf.length);
       }
     } else {
       if (position !== null) {
         fd.seek(position)
       }
-      fd.write(blob)
-      callback(null, buf.length)
+      fd.write(blob);
+      callback(null, buf.length);
     }
   }
-}
+};
 
 exports.unlink = function (fd, callback) {
-  var path = resolve(fd)
-  window.requestFileSystem(
-        window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
+  var path = resolve(fd);
+  requestFileSystem(
         function (cfs) {
           cfs.root.getFile(
                 path,
                 {},
                 function (fileEntry) {
-                  fileEntry.remove(callback)
-                })
-        }, callback)
-}
+                  fileEntry.remove(callback);
+                });
+        }, callback);
+};
 
 exports.writeFile = function (path, data, options, cb) {
-  var callback = maybeCallback(arguments[arguments.length - 1])
+  var callback = maybeCallback(arguments[arguments.length - 1]);
 
   if (util.isFunction(options) || !options) {
-    options = { encoding: 'utf8', mode: 438, flag: 'w' }
+    options = { encoding: 'utf8', mode: 438, flag: 'w' };
   } else if (util.isString(options)) {
-    options = { encoding: options, mode: 438, flag: 'w' }
+    options = { encoding: options, mode: 438, flag: 'w' };
   } else if (!util.isObject(options)) {
-    throw new TypeError('Bad arguments')
+    throw new TypeError('Bad arguments');
   }
 
-  assertEncoding(options.encoding)
+  assertEncoding(options.encoding);
 
-  var flag = options.flag || 'w' // eslint-disable-line
-  window.requestFileSystem(
-    window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
+  var flag = options.flag || 'w'; // eslint-disable-line
+  requestFileSystem(
     function (cfs) {
-      var opts = {}
+      var opts = {};
       if (flag === 'w') {
-        opts = {create: true}
+        opts = {create: true};
       }
       cfs.root.getFile(
             path,
@@ -583,48 +630,47 @@ exports.writeFile = function (path, data, options, cb) {
               // otherwise we get the file because 'standards'
               if (flag === 'w') {
                 fileEntry.createWriter(function (fileWriter) {
-                  fileWriter.onerror = callback
+                  fileWriter.onerror = callback;
                   if (typeof callback === 'function') {
                     fileWriter.onwriteend = function (evt) {
-                      window.setTimeout(callback, 0, null, evt)
-                    }
+                      window.setTimeout(callback, 0, null, evt);
+                    };
                   } else {
-                    fileWriter.onwriteend = function () {}
+                    fileWriter.onwriteend = function () {};
                   }
-                  fileWriter.onprogress = function () {}
+                  fileWriter.onprogress = function () {};
                   var blob = new Blob([data], {type: 'text/plain'}) // eslint-disable-line
-                  fileWriter.write(blob)
+                  fileWriter.write(blob);
                 }, function (evt) {
                      if (evt.type !== 'writeend') {
-                       callback(evt)
+                       callback(evt);
                      }
-                   })
+                   });
               } else {
-                callback('incorrect flag')
+                callback('incorrect flag');
               }
-            }, function () {})
-    }, callback)
-}
+            }, function () {});
+    }, callback);
+};
 
 exports.appendFile = function (path, data, options, cb) {
-  var callback = maybeCallback(arguments[arguments.length - 1])
+  var callback = maybeCallback(arguments[arguments.length - 1]);
 
   if (util.isFunction(options) || !options) {
-    options = { encoding: 'utf8', mode: 438, flag: 'a' }
+    options = { encoding: 'utf8', mode: 438, flag: 'a' };
   } else if (util.isString(options)) {
-    options = { encoding: options, mode: 438, flag: 'a' }
+    options = { encoding: options, mode: 438, flag: 'a' };
   } else if (!util.isObject(options)) {
-    throw new TypeError('Bad arguments')
+    throw new TypeError('Bad arguments');
   }
 
-  var flag = options.flag || 'a' // eslint-disable-line
+  var flag = options.flag || 'a'; // eslint-disable-line
 
-  window.requestFileSystem(
-    window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE,
+  requestFileSystem(
     function (cfs) {
-      var opts = {}
+      var opts = {};
       if (flag === 'a') {
-        opts = {create: true}
+        opts = {create: true};
       }
       cfs.root.getFile(
             path,
@@ -634,320 +680,294 @@ exports.appendFile = function (path, data, options, cb) {
               // otherwise we get the file because 'standards'
               if (flag === 'a') {
                 fileEntry.createWriter(function (fileWriter) {
-                  fileWriter.onerror = callback
+                  fileWriter.onerror = callback;
                   if (typeof callback === 'function') {
                     fileWriter.onwriteend = function (evt) {
-                      window.setTimeout(callback, 0, null, evt)
-                    }
+                      window.setTimeout(callback, 0, null, evt);
+                    };
                   } else {
-                    fileWriter.onwriteend = function () {}
+                    fileWriter.onwriteend = function () {};
                   }
-                  fileWriter.onprogress = function () {}
-                  fileWriter.seek(fileWriter.length)
-                  var blob = new Blob([data], {type: 'text/plain'}) // eslint-disable-line
-                  fileWriter.write(blob)
-                }, callback)
+                  fileWriter.onprogress = function () {};
+                  fileWriter.seek(fileWriter.length);
+                  var blob = new Blob([data], {type: 'text/plain'}); // eslint-disable-line
+                  fileWriter.write(blob);
+                }, callback);
               } else {
-                callback('incorrect flag')
+                callback('incorrect flag');
               }
-            }, callback)
-    }, callback)
-}
+            }, callback);
+    }, callback);
+};
 
 exports.close = function (fd, callback) {
   fd.onwriteend = function (progressinfo) {
-    var cb = makeCallback(callback)
-    cb(null, progressinfo)
-  }
-}
-
-exports.createReadStream = function (path, options) {
-  return new ReadStream(path, options)
-}
-
-util.inherits(ReadStream, Readable)
-exports.ReadStream = ReadStream
+    var cb = makeCallback(callback);
+    cb(null, progressinfo);
+  };
+};
 
 function ReadStream (path, options) {
   if (!(this instanceof ReadStream)) {
-    return new ReadStream(path, options)
+    return new ReadStream(path, options);
   }
   // a little bit bigger buffer and water marks by default
   options = util._extend({
     highWaterMark: 64 * 1024
-  }, options || {})
+  }, options || {});
 
-  Readable.call(this, options)
+  Readable.call(this, options);
 
-  this.path = path
-  this.fd = options.hasOwnProperty('fd') ? options.fd : null
-  this.flags = options.hasOwnProperty('flags') ? options.flags : 'r'
-  this.mode = options.hasOwnProperty('mode') ? options.mode : 438 /*=0666*/
+  this.path = path;
+  this.fd = options.hasOwnProperty('fd') ? options.fd : null;
+  this.flags = options.hasOwnProperty('flags') ? options.flags : 'r';
+  this.mode = options.hasOwnProperty('mode') ? options.mode : 438; /*=0666*/
 
-  this.start = options.hasOwnProperty('start') ? options.start : undefined
-  this.end = options.hasOwnProperty('end') ? options.end : undefined
+  this.start = options.hasOwnProperty('start') ? options.start : undefined;
+  this.end = options.hasOwnProperty('end') ? options.end : undefined;
   this.autoClose = options.hasOwnProperty('autoClose') ?
-      options.autoClose : true
-  this.pos = undefined
+      options.autoClose : true;
+  this.pos = undefined;
 
   if (!util.isUndefined(this.start)) {
     if (!util.isNumber(this.start)) {
-      throw TypeError('start must be a Number')
+      throw TypeError('start must be a Number');
     }
     if (util.isUndefined(this.end)) {
-      this.end = Infinity
+      this.end = Infinity;
     } else if (!util.isNumber(this.end)) {
-      throw TypeError('end must be a Number')
+      throw TypeError('end must be a Number');
     }
 
     if (this.start > this.end) {
-      throw new Error('start must be <= end')
+      throw new Error('start must be <= end');
     }
 
-    this.pos = this.start
+    this.pos = this.start;
   }
 
   if (!util.isNumber(this.fd)) {
-    this.open()
+    this.open();
   }
   this.on('end', function () {
     if (this.autoClose) {
-      this.destroy()
+      this.destroy();
     }
-  })
+  });
 }
 
-exports.FileReadStream = exports.ReadStream // support the legacy name
+exports.createReadStream = function (path, options) {
+  return new ReadStream(path, options);
+};
+
+util.inherits(ReadStream, Readable);
+exports.ReadStream = ReadStream;
+
+exports.FileReadStream = exports.ReadStream; // support the legacy name
 
 ReadStream.prototype.open = function () {
-  var self = this
+  var self = this;
   exports.open(this.path, this.flags, this.mode, function (er, fd) {
     if (er) {
       if (self.autoClose) {
-        self.destroy()
+        self.destroy();
       }
-      self.emit('error', er)
-      return
+      self.emit('error', er);
+      return;
     }
 
-    self.fd = fd
-    self.emit('open', fd)
+    self.fd = fd;
+    self.emit('open', fd);
     // start the flow of data.
     debugger // eslint-disable-line
-    self.read()
-  })
-}
+    self.read();
+  });
+};
 
 ReadStream.prototype._read = function (n) {
   if (!util.isNumber(this.fd)) {
     return this.once('open', function () {
-      this._read(n)
-    })
+      this._read(n);
+    });
   }
 
   if (this.destroyed) {
-    return
+    return;
   }
 
   if (!pool || pool.length - pool.used < kMinPoolSpace) {
     // discard the old pool.
-    pool = null
-    allocNewPool(this._readableState.highWaterMark)
+    pool = null;
+    allocNewPool(this._readableState.highWaterMark);
   }
 
   // Grab another reference to the pool in the case that while we're
   // in the thread pool another read() finishes up the pool, and
   // allocates a new one.
-  var thisPool = pool
-  var toRead = Math.min(pool.length - pool.used, n)
-  var start = pool.used
+  var thisPool = pool;
+  var toRead = Math.min(pool.length - pool.used, n);
+  var start = pool.used;
 
   if (!util.isUndefined(this.pos)) {
-    toRead = Math.min(this.end - this.pos + 1, toRead)
+    toRead = Math.min(this.end - this.pos + 1, toRead);
   }
 
   // already read everything we were supposed to read!
   // treat as EOF.
   if (toRead <= 0) {
-    return this.push(null)
+    return this.push(null);
   }
   // the actual read.
-  var self = this
-  exports.read(this.fd, pool, pool.used, toRead, this.pos, onread)
+  var self = this;
+  exports.read(this.fd, pool, pool.used, toRead, this.pos, onread);
 
   // move the pool positions, and internal position for reading.
   if (!util.isUndefined(this.pos)) {
-    this.pos += toRead
+    this.pos += toRead;
   }
-  pool.used += toRead
+  pool.used += toRead;
 
   function onread (er, bytesRead) {
     if (er) {
       if (self.autoClose) {
-        self.destroy()
+        self.destroy();
       }
-      self.emit('error', er)
+      self.emit('error', er);
     } else {
-      var b = null
+      var b = null;
       if (bytesRead > 0) {
-        b = thisPool.slice(start, start + bytesRead)
+        b = thisPool.slice(start, start + bytesRead);
       }
-      self.push(b)
+      self.push(b);
     }
   }
-}
+};
 
 ReadStream.prototype.destroy = function () {
   if (this.destroyed) {
-    return
+    return;
   }
 
-  this.destroyed = true
+  this.destroyed = true;
 
   if (util.isNumber(this.fd)) {
-    this.close()
+    this.close();
   }
-}
+};
 
 ReadStream.prototype.close = function (cb) {
-  var self = this
+  var self = this;
   if (cb) {
-    this.once('close', cb)
+    this.once('close', cb);
   }
   if (this.closed || !util.isNumber(this.fd)) {
     if (!util.isNumber(this.fd)) {
-      this.once('open', close)
-      return
+      this.once('open', close);
+      return;
     }
-    return process.nextTick(this.emit.bind(this, 'close'))
+    return process.nextTick(this.emit.bind(this, 'close'));
   }
-  this.closed = true
-  close()
 
   function close (fd) {
     exports.close(fd || self.fd, function (er) {
       if (er) {
-        self.emit('error', er)
+        self.emit('error', er);
       } else {
-        self.emit('close')
+        self.emit('close');
       }
-    })
-    self.fd = null
+    });
+    self.fd = null;
   }
-}
 
-exports.createWriteStream = function (path, options) {
-  return new WriteStream(path, options)
-}
+  this.closed = true;
+  close();
+};
 
-util.inherits(WriteStream, Writable)
-exports.WriteStream = WriteStream
 function WriteStream (path, options) {
   if (!(this instanceof WriteStream)) {
-    return new WriteStream(path, options)
+    return new WriteStream(path, options);
   }
-  options = options || {}
+  options = options || {};
 
-  Writable.call(this, options)
+  Writable.call(this, options);
 
-  this.path = path
-  this.fd = null
+  this.path = path;
+  this.fd = null;
 
-  this.fd = options.hasOwnProperty('fd') ? options.fd : null
-  this.flags = options.hasOwnProperty('flags') ? options.flags : 'w'
-  this.mode = options.hasOwnProperty('mode') ? options.mode : 438 /*=0666*/
+  this.fd = options.hasOwnProperty('fd') ? options.fd : null;
+  this.flags = options.hasOwnProperty('flags') ? options.flags : 'w';
+  this.mode = options.hasOwnProperty('mode') ? options.mode : 438; /*=0666*/
 
-  this.start = options.hasOwnProperty('start') ? options.start : undefined
-  this.pos = undefined
-  this.bytesWritten = 0
+  this.start = options.hasOwnProperty('start') ? options.start : undefined;
+  this.pos = undefined;
+  this.bytesWritten = 0;
 
   if (!util.isUndefined(this.start)) {
     if (!util.isNumber(this.start)) {
-      throw TypeError('start must be a Number')
+      throw new TypeError('start must be a Number');
     }
     if (this.start < 0) {
-      throw new Error('start must be >= zero')
+      throw new Error('start must be >= zero');
     }
 
-    this.pos = this.start
+    this.pos = this.start;
   }
 
   if (!util.isNumber(this.fd)) {
-    this.open()
+    this.open();
   }
   // dispose on finish.
-  this.once('finish', this.close)
+  this.once('finish', this.close);
 }
 
-exports.FileWriteStream = exports.WriteStream // support the legacy name
+util.inherits(WriteStream, Writable);
+exports.WriteStream = WriteStream;
+
+exports.createWriteStream = function (path, options) {
+  return new WriteStream(path, options);
+};
+
+exports.FileWriteStream = exports.WriteStream; // support the legacy name
 
 WriteStream.prototype.open = function () {
   exports.open(this.path, this.flags, this.mode, function (er, fd) {
     if (er) {
-      this.destroy()
-      this.emit('error', er)
-      return
+      this.destroy();
+      this.emit('error', er);
+      return;
     }
 
-    this.fd = fd
-    this.emit('open', fd)
-  }.bind(this))
-}
+    this.fd = fd;
+    this.emit('open', fd);
+  }.bind(this));
+};
 
 WriteStream.prototype._write = function (data, encoding, cb) {
   if (!util.isBuffer(data)) {
-    return this.emit('error', new Error('Invalid data'))
+    return this.emit('error', new Error('Invalid data'));
   }
   if (!util.isNumber(this.fd)) {
     return this.once('open', function () {
-      this._write(data, encoding, cb)
-    })
+      this._write(data, encoding, cb);
+    });
   }
-  var self = this
+  var self = this;
   exports.write(this.fd, data, 0, data.length, this.pos, function (er, bytes) {
     if (er) {
-      self.destroy()
-      return cb(er)
+      self.destroy();
+      return cb(er);
     }
-    self.bytesWritten += bytes
-    cb()
-  })
+    self.bytesWritten += bytes;
+    cb();
+  });
 
   if (!util.isUndefined(this.pos)) {
-    this.pos += data.length
+    this.pos += data.length;
   }
-}
+};
 
-WriteStream.prototype.destroy = ReadStream.prototype.destroy
-WriteStream.prototype.close = ReadStream.prototype.close
+WriteStream.prototype.destroy = ReadStream.prototype.destroy;
+WriteStream.prototype.close = ReadStream.prototype.close;
 
 // There is no shutdown() for files.
-WriteStream.prototype.destroySoon = WriteStream.prototype.end
-
-function flagToString (flag) {
-  // Only mess with strings
-  if (util.isString(flag)) {
-    return flag
-  }
-
-  switch (flag) {
-    case O_RDONLY : return 'r'
-    case O_RDONLY | O_SYNC : return 'sr'
-    case O_RDWR : return 'r+'
-    case O_RDWR | O_SYNC : return 'sr+'
-
-    case O_TRUNC | O_CREAT | O_WRONLY : return 'w'
-    case O_TRUNC | O_CREAT | O_WRONLY | O_EXCL : return 'xw'
-
-    case O_TRUNC | O_CREAT | O_RDWR : return 'w+'
-    case O_TRUNC | O_CREAT | O_RDWR | O_EXCL : return 'xw+'
-
-    case O_APPEND | O_CREAT | O_WRONLY : return 'a'
-    case O_APPEND | O_CREAT | O_WRONLY | O_EXCL : return 'xa'
-
-    case O_APPEND | O_CREAT | O_RDWR : return 'a+'
-    case O_APPEND | O_CREAT | O_RDWR | O_EXCL : return 'xa+'
-  }
-
-  throw new Error('Unknown file open flag: ' + flag)
-}
+WriteStream.prototype.destroySoon = WriteStream.prototype.end;
