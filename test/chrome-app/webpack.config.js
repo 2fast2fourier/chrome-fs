@@ -5,7 +5,7 @@ module.exports = {
   entry: './test/chrome-app/index.js',
   output: {
     path: __dirname,
-    filename: './test/chrome-app/bundle.js'
+    filename: 'bundle.js'
   },
   module: {
     loaders: [

@@ -516,12 +516,12 @@ exports.readFile = function (path, options, cb) {
                 fileEntry.file(function (file) {
                   fileEntry.onerror = callback;
                   var fileReader = new FileReader(); // eslint-disable-line
-                  fileReader.onload = function (evt) {
+                  fileReader.onload = function () {
                     window.setTimeout(callback, 0, null, this.result);
-                  }
+                  };
                   fileReader.onerror = function (evt) {
                     callback(evt, null);
-                  }
+                  };
 
                   if (file.type === 'text/plain') {
                     fileReader.readAsText(file);
@@ -547,7 +547,7 @@ exports.write = function (fd, buffer, offset, length, position, callback) {
       fd.onwriteend = function () {
         fd.write(blob);
         callback(null, buf.length);
-      }
+      };
     } else {
       fd.write(bufblob);
       callback(null, tmpbuf.length);
@@ -819,13 +819,6 @@ ReadStream.prototype._read = function (n) {
   }
   // the actual read.
   var self = this;
-  exports.read(this.fd, pool, pool.used, toRead, this.pos, onread);
-
-  // move the pool positions, and internal position for reading.
-  if (!util.isUndefined(this.pos)) {
-    this.pos += toRead;
-  }
-  pool.used += toRead;
 
   function onread (er, bytesRead) {
     if (er) {
@@ -841,6 +834,13 @@ ReadStream.prototype._read = function (n) {
       self.push(b);
     }
   }
+  exports.read(this.fd, pool, pool.used, toRead, this.pos, onread);
+
+  // move the pool positions, and internal position for reading.
+  if (!util.isUndefined(this.pos)) {
+    this.pos += toRead;
+  }
+  pool.used += toRead;
 };
 
 ReadStream.prototype.destroy = function () {

@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
 
-  "name": "chrome-fs-test",
-  "description": "A test harness for fs module in chrome using browserify.",
+  "name": "chrome-sync-fs-test",
+  "description": "A test harness for fs module in chrome using syncFileSystem.",
   "version": "1.0.0",
 
   "app": {
@@ -11,6 +11,7 @@
     }
   },
   "permissions": [
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "syncFileSystem"
   ]
 }

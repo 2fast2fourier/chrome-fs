@@ -33,7 +33,6 @@ fs.stat('.', function (err, stats) {
     assert.ok(stats.mtime instanceof Date)
     success_count++
   }
-  assert(this === global)
 })
 
 fs.stat('.', function (err, stats) {
@@ -69,10 +68,8 @@ fs.open('.', 'r', undefined, function (err, fd) {
       success_count++
       fs.close(fd)
     }
-    assert(this === global)
   })
 
-  assert(this === global)
 })
 
 var filelocation = '/test-fs-stat.txt'
