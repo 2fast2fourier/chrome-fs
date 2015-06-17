@@ -25,7 +25,7 @@ var O_WRONLY = constants.O_WRONLY || 0;
 function requestFileSystem(callback, errorCallback){
   chrome.syncFileSystem.requestFileSystem(function(filesystem){
     var err = chrome.runtime.lastError;
-    if(err){
+    if(err || filesystem == null){
       if(errorCallback){
         errorCallback(err);
       }
@@ -488,7 +488,7 @@ exports.read = function (fd, buffer, offset, length, position, callback) {
 
   if (fd.type === 'text/plain') {
     fileReader.readAsText(data);
-  } else if (fd.type === 'application/octet-binary') {
+  } else {
     fileReader.readAsArrayBuffer(data);
   }
 };
@@ -517,15 +517,17 @@ exports.readFile = function (path, options, cb) {
                   fileEntry.onerror = callback;
                   var fileReader = new FileReader(); // eslint-disable-line
                   fileReader.onload = function () {
+                    // TODO implement options.encoding
                     window.setTimeout(callback, 0, null, this.result);
                   };
                   fileReader.onerror = function (evt) {
                     callback(evt, null);
                   };
 
-                  if (file.type === 'text/plain') {
+                  // TODO implement proper options.encoding support
+                  if (file.type === 'text/plain' || options.encoding === 'utf8') {
                     fileReader.readAsText(file);
-                  } else if (file.type === 'application/octet-binary') {
+                  }else{
                     fileReader.readAsArrayBuffer(file);
                   }
                 });
