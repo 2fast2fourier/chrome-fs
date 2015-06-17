@@ -233,7 +233,17 @@ exports.rmdir = function (path, callback) {
               function (dirEntry) {
                 dirEntry.remove(function () {
                   callback();
-                }, callback);
+                }, function(err){
+                  if(err.code === 9){
+                    // INVALID_MODIFICATION_ERR - 9, will trigger if directory is not empty.
+                    var newerr = new Error('ENOTEMPTY');
+                    newerr.name = err.name;
+                    newerr.code = 'ENOTEMPTY';
+                    callback(newerr);
+                  }else{
+                    callback(err);
+                  }
+                });
               }, callback);
       }, callback);
 };
@@ -380,6 +390,10 @@ exports.stat = function (path, callback) {
 
 exports.fstat = function (fd, callback) {
   this.stat(fd.filePath, callback);
+};
+
+exports.lstat = function (fpath, callback) {
+  this.stat(fpath, callback);
 };
 
 exports.writeFile = function (path, data, options, cb) {
