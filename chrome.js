@@ -26,12 +26,13 @@ function requestFileSystem(callback, errorCallback){
   chrome.syncFileSystem.requestFileSystem(function(filesystem){
     var err = chrome.runtime.lastError;
     if(err || filesystem == null){
-      if(errorCallback){
-        errorCallback(err);
-      }
-      return;
+      var reqFS = window.requestFileSystem || window.webkitRequestFileSystem;
+      reqFS(window.PERSISTENT, FILESYSTEM_DEFAULT_SIZE, function(fs){
+        callback(fs);
+      }, errorCallback);
+    }else{
+      callback(filesystem);
     }
-    callback(filesystem);
   });
 }
 
